@@ -36,6 +36,15 @@ class FeatureBasedTracker:
         )
         return corners
 
+    def initialize_tracker(self, frame):
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.previous_points = self._detect_initial_features(frame_gray)
+        if self.previous_points is not None and len(self.previous_points) >= self.min_points_for_bbox:
+            self.tracking_initialized = True
+            self.previous_frame = frame_gray
+            return True
+        return False
+
     def process_frame(self, frame):
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -48,13 +57,11 @@ class FeatureBasedTracker:
             else:
                 return frame.copy()
         else:
-            # Расчёт optical flow
             new_points, status, _ = cv2.calcOpticalFlowPyrLK(
                 self.previous_frame, frame_gray, self.previous_points, None, **self.lk_params
             )
 
             if new_points is None or status is None or len(new_points[status == 1]) < self.min_points_for_bbox:
-                # Трекинг потерян — сброс
                 self.tracking_initialized = False
                 self.previous_frame = None
                 self.previous_points = None
@@ -74,7 +81,6 @@ class FeatureBasedTracker:
         for x, y in points_flat:
             cv2.circle(frame, (int(x), int(y)), 5, (0, 255, 0), -1)
 
-        # bounding box
         x_coords = points_flat[:, 0]
         y_coords = points_flat[:, 1]
         x_min, x_max = int(x_coords.min()), int(x_coords.max())
@@ -82,17 +88,48 @@ class FeatureBasedTracker:
 
         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
 
+        cv2.putText(frame, 'Tracked object', (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
         return frame
 
 
 class VideoTracker:
-    def __init__(self, video_path, tracker: FeatureBasedTracker):
+    def __init__(self, video_path, tracker: FeatureBasedTracker, max_window_width=800):
+        """
+        :param video_path: Путь к файлу
+        :param tracker: Объект трекера
+        :param max_window_width: Максимальная ширина окна (высота вычисляется автоматически)
+        """
         self.video_path = video_path
         self.cap = cv2.VideoCapture(video_path)
         self.tracker = tracker
+        self.max_window_width = max_window_width
 
         if not self.cap.isOpened():
             raise IOError(f"Не удалось открыть видеофайл: {video_path}")
+
+        self.original_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.original_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if self.original_width > max_window_width:
+            scale_factor = max_window_width / self.original_width
+            self.window_width = max_window_width
+            self.window_height = int(self.original_height * scale_factor)
+        else:
+            self.window_width = self.original_width
+            self.window_height = self.original_height
+
+        print(f"Оригинальный размер видео: {self.original_width}x{self.original_height}")
+        print(f"Размер окна: {self.window_width}x{self.window_height}")
+
+        cv2.namedWindow('Tracker', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Tracker', self.window_width, self.window_height)
+
+    def _resize_frame(self, frame):
+        if self.original_width <= self.max_window_width:
+            return frame
+        resized_frame = cv2.resize(frame,(self.window_width, self.window_height), interpolation=cv2.INTER_LINEAR)
+        return resized_frame
 
     def run(self):
         try:
@@ -102,17 +139,49 @@ class VideoTracker:
                     break
 
                 tracked_frame = self.tracker.process_frame(frame)
-                cv2.imshow('Tracker', tracked_frame)
+                resized_frame = self._resize_frame(tracked_frame)
+                cv2.imshow('Tracker', resized_frame)
 
-                if cv2.waitKey(30) & 0xFF == ord('q'):
+                key = cv2.waitKey(30) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('+'):
+                    self.max_window_width = min(self.max_window_width + 100, 1920)
+                    if self.original_width > self.max_window_width:
+                        scale_factor = self.max_window_width / self.original_width
+                        self.window_width = self.max_window_width
+                        self.window_height = int(self.original_height * scale_factor)
+                    cv2.resizeWindow('Tracker', self.window_width, self.window_height)
+                elif key == ord('-'):
+                    self.max_window_width = max(self.max_window_width - 100, 320)
+                    if self.original_width > self.max_window_width:
+                        scale_factor = self.max_window_width / self.original_width
+                        self.window_width = self.max_window_width
+                        self.window_height = int(self.original_height * scale_factor)
+                    cv2.resizeWindow('Tracker', self.window_width, self.window_height)
+                elif key == ord('f'):
+                    if cv2.getWindowProperty('Tracker', cv2.WND_PROP_FULLSCREEN) == 0:
+                        cv2.setWindowProperty('Tracker', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                    else:
+                        cv2.setWindowProperty('Tracker', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                        cv2.resizeWindow('Tracker', self.window_width, self.window_height)
+
         finally:
             self.cap.release()
             cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    video_file = "./IMG_7315.MP4"
-    tracker = FeatureBasedTracker(min_points_for_bbox=5, max_corners=100, block_size=7)
-    video_tracker = VideoTracker(video_file, tracker)
+    video_file = "./mona-lisa.avi"
+    tracker = FeatureBasedTracker(min_points_for_bbox=10, max_corners=500, quality_level=0.01, min_distance=3, block_size=5)
+    video_tracker = VideoTracker(video_file, tracker, max_window_width=800)
+    ret, first_frame = video_tracker.cap.read()
+    if ret:
+        success = tracker.initialize_tracker(first_frame)
+        if success:
+            print("Трекер успешно инициализирован по первому кадру")
+            video_tracker.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        else:
+            print("Не удалось инициализировать трекер по первому кадру")
+
     video_tracker.run()
